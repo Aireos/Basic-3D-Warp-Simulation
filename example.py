@@ -1,86 +1,141 @@
-import warp as wp
 import pygame
+from pygame.locals import DOUBLEBUF, OPENGL
 import numpy as np
+import warp as wp
+from OpenGL.GL import *
+from OpenGL.GLU import *
+from OpenGL.GLUT import glutInit, glutSolidSphere
 
-# --- 1. Warp Simulation Setup ---
-wp.init()
+# --- Simulation Parameters ---
+num_particles = 128
+screen_width, screen_height, screen_depth = 800, 600, 600
+radius = 12.0
 
-num_particles = 1024
-screen_width, screen_height = 800, 600
-
+# --- Warp Physics Kernel, fully float-safe and robust ---
 @wp.kernel
 def update_particles(
-    positions: wp.array(dtype=wp.vec2),
-    velocities: wp.array(dtype=wp.vec2),
+    positions: wp.array(dtype=wp.vec3),
+    velocities: wp.array(dtype=wp.vec3),
     dt: float,
-    screen_w: int,
-    screen_h: int
+    radius: float,
+    bound_x: float,
+    bound_y: float,
+    bound_z: float
 ):
     tid = wp.tid()
     pos = positions[tid]
     vel = velocities[tid]
 
-    # Apply gravity (simple downward force)
-    vel += wp.vec2(0.0, 9.8 * dt)
-
-    # Update position
+    # Gravity
+    vel += wp.vec3(0.0, -9.8 * dt, 0.0)
     pos += vel * dt
 
-    # Boundary conditions (bounce off edges)
-    if pos[0] < 0.0 or pos[0] > screen_w:
-        vel *= wp.vec2(-1.0, 1.0)
-        pos = wp.clamp(pos, wp.vec2(0.0, 0.0), wp.vec2(screen_w, screen_h)) # Clamp to stay in bounds
-    if pos[1] < 0.0 or pos[1] > screen_h:
-        vel *= wp.vec2(1.0, -1.0)
-        pos = wp.clamp(pos, wp.vec2(0.0, 0.0), wp.vec2(screen_w, screen_h))
+    # Elastic collisions (O(N^2), suitable for < 1000 particles)
+    for j in range(positions.shape[0]):
+        if j != tid:
+            other_pos = positions[j]
+            other_vel = velocities[j]
+            delta = pos - other_pos
+            dist = wp.length(delta)
+            min_dist = 2.0 * radius  # float32!
+            if dist < min_dist and dist > 1e-6:
+                normal = delta / dist
+                rel_vel = vel - other_vel
+                sep_vel = wp.dot(rel_vel, normal)
+                if sep_vel < 0.0:  # Only adjust if approaching
+                    # Exchange velocities along collision axis (equal mass)
+                    vel = vel - sep_vel * normal
+                    # Push apart to avoid overlap
+                    overlap = min_dist - dist
+                    pos = pos + 0.5 * overlap * normal
+
+    # Wall boundary bounce (float32 math everywhere!)
+    if pos[0] < radius or pos[0] > bound_x - radius:
+        vel = wp.vec3(-vel[0], vel[1], vel[2])
+        pos = wp.vec3(
+            wp.clamp(pos[0], radius, bound_x-radius),
+            wp.clamp(pos[1], radius, bound_y-radius),
+            wp.clamp(pos[2], radius, bound_z-radius)
+        )
+    if pos[1] < radius or pos[1] > bound_y - radius:
+        vel = wp.vec3(vel[0], -vel[1], vel[2])
+        pos = wp.vec3(
+            wp.clamp(pos[0], radius, bound_x-radius),
+            wp.clamp(pos[1], radius, bound_y-radius),
+            wp.clamp(pos[2], radius, bound_z-radius)
+        )
+    if pos[2] < radius or pos[2] > bound_z - radius:
+        vel = wp.vec3(vel[0], vel[1], -vel[2])
+        pos = wp.vec3(
+            wp.clamp(pos[0], radius, bound_x-radius),
+            wp.clamp(pos[1], radius, bound_y-radius),
+            wp.clamp(pos[2], radius, bound_z-radius)
+        )
 
     positions[tid] = pos
     velocities[tid] = vel
 
-# Initialize particle positions and velocities on the GPU
-positions_gpu = wp.zeros(num_particles, dtype=wp.vec2, device="cuda")
-velocities_gpu = wp.zeros(num_particles, dtype=wp.vec2, device="cuda")
+# --- Initialization ---
+wp.init()
+glutInit()  # REQUIRED before using glutSolidSphere!
 
-# Initial positions (randomized)
-# Copy initial random positions from CPU (NumPy) to GPU (Warp array)
-initial_positions_cpu = np.random.rand(num_particles, 2).astype(np.float32) * [screen_width, screen_height]
-wp.copy(positions_gpu, initial_positions_cpu)
+# Positions: uniformly inside box, keeping 1 radius distance from walls
+init_positions = np.random.rand(num_particles, 3).astype(np.float32)
+init_positions *= np.array([screen_width, screen_height, screen_depth], dtype=np.float32) - 2.0 * radius
+init_positions += radius
 
-# --- 2. Pygame Setup ---
+positions_gpu = wp.from_numpy(init_positions, dtype=wp.vec3, device="cuda")
+init_vel = (np.random.rand(num_particles, 3)-0.5) * 120.0
+velocities_gpu = wp.from_numpy(init_vel.astype(np.float32), dtype=wp.vec3, device="cuda")
+positions_cpu = wp.zeros(num_particles, dtype=wp.vec3, device="cpu")
+
 pygame.init()
-screen = pygame.display.set_mode((screen_width, screen_height))
-pygame.display.set_caption("NVIDIA Warp Simulation with Pygame")
+pygame.display.set_mode((screen_width, screen_height), DOUBLEBUF | OPENGL)
+pygame.display.set_caption("Warp 3D Spheres: Gravity & Elastic Collisions")
+
+glEnable(GL_DEPTH_TEST)
+gluPerspective(45.0, float(screen_width) / float(screen_height), 0.1, 2000.0)
+
+cam_x, cam_y, cam_z = screen_width/2.0, screen_height/2.0, -900.0
+cam_look = [screen_width/2.0, screen_height/2.0, screen_depth/2.0]
+
 clock = pygame.time.Clock()
 running = True
 
-# Buffer for copying data from GPU to CPU
-positions_cpu = np.zeros((num_particles, 2), dtype=np.float32)
-
-# --- 3. Main Game Loop ---
 while running:
+    dt = clock.tick(60) / 1000.0  # float
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
 
-    # --- Simulation Step (Warp) ---
-    dt = clock.tick(60) / 1000.0  # Time delta in seconds, capped at 60 FPS
+    # Camera movement controls (optional, e.g. WASD):
+
+    # Physics step - all kernel args are float!
     wp.launch(
         kernel=update_particles,
         dim=num_particles,
-        inputs=[positions_gpu, velocities_gpu, dt, screen_width, screen_height],
+        inputs=[
+            positions_gpu, velocities_gpu,
+            float(dt), float(radius),
+            float(screen_width), float(screen_height), float(screen_depth)
+        ],
         device="cuda"
     )
-
-    # --- Data Transfer (GPU to CPU) ---
-    # Asynchronously copy the positions data to the CPU buffer
     wp.copy(positions_cpu, positions_gpu)
+    positions = positions_cpu.numpy()
 
-    # --- Rendering Step (Pygame) ---
-    screen.fill((0, 0, 0))  # Clear screen with black
-    for i in range(num_particles):
-        x, y = positions_cpu[i]
-        pygame.draw.circle(screen, (0, 255, 0), (int(x), int(y)), 5) # Draw particles as green circles
+    # Rendering - safe GLUT usage
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+    glLoadIdentity()
+    gluLookAt(cam_x, cam_y, cam_z, cam_look[0], cam_look[1], cam_look[2], 0.0, 1.0, 0.0)
 
-    pygame.display.flip()  # Update the display
+    for x, y, z in positions:
+        glPushMatrix()
+        glTranslatef(float(x), float(y), float(z))
+        glColor3f(0.2, 0.8, 0.4)
+        glutSolidSphere(float(radius), 12, 12)
+        glPopMatrix()
+
+    pygame.display.flip()
 
 pygame.quit()
