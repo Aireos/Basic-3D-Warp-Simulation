@@ -39,7 +39,7 @@ MAX_SUBSTEPS_PER_FRAME = 3     # safety to avoid spiral of death
 BOUNDS_MIN = np.array([-50.0, 0.0, -50.0], dtype=float)
 BOUNDS_MAX = np.array([ 50.0, 40.0, 50.0], dtype=float)
 
-NUM_OBJECTS = 500 # OG: 100
+NUM_OBJECTS = 100 # OG: 100
 DENSITY = 1.0
 
 # Rendering detail (reduced a bit)
@@ -123,7 +123,7 @@ def spawn_objects():
             random.uniform(BOUNDS_MIN[1]+6.0, BOUNDS_MAX[1]-6.0),
             random.uniform(BOUNDS_MIN[2]+6.0, BOUNDS_MAX[2]-6.0)
         ], dtype=float)
-        vel = np.array([random.uniform(-250,250), random.uniform(-250,250), random.uniform(-250,250)], dtype=float) # OG: -6,6 / -6,6 / -6,6
+        vel = np.array([random.uniform(-10,10), random.uniform(-10,10), random.uniform(-10,10)], dtype=float) # OG: -6,6 / -6,6 / -6,6
         axis = np.random.normal(size=3)
         n = np.linalg.norm(axis)
         axis = axis / (n + 1e-12)
@@ -393,7 +393,7 @@ def draw_sphere(radius):
     if quadric is None:
         quadric = gluNewQuadric()
         gluQuadricNormals(quadric, GLU_SMOOTH)
-    glColor3f(random.uniform(0,1),random.uniform(0,1),random.uniform(0,1)) # OG: 0.8, 0.25, 0.25
+    glColor3f(0.8,0.25,0.25) # OG: 0.8, 0.25, 0.25
     gluSphere(quadric, radius, SPHERE_SLICES, SPHERE_STACKS)
 
 def draw_grid(size=140, step=GRID_STEP):
